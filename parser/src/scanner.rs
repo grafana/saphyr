@@ -1896,6 +1896,14 @@ impl<'input, T: Input> Scanner<'input, T> {
 
     #[allow(clippy::too_many_lines)]
     fn scan_flow_scalar(&mut self, single: bool) -> Result<Token<'input>, ScanError> {
+        // Unroll non-block indents to get the true block indent level.
+        // This is necessary for multi-line quoted scalars where continuation lines
+        // may start at the block indent level, not at the column where the quote began.
+        // Without this, the indentation check would fail for valid YAML like:
+        //   description: 'multi-line
+        //   continuation'
+        self.unroll_non_block_indents();
+
         let start_mark = self.mark;
 
         let mut string = String::new();
