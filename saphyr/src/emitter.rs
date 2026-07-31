@@ -2,12 +2,12 @@
 
 use core::fmt;
 
+use ordered_float::FloatCore;
 use thiserror::Error;
 
 use crate::{
-    char_traits,
+    Scalar, char_traits,
     yaml::{Mapping, Yaml},
-    Scalar,
 };
 
 /// An error when emitting YAML.
@@ -224,7 +224,11 @@ impl<'a> YamlEmitter<'a> {
                 Ok(())
             }
             Yaml::Value(Scalar::Integer(v)) => Ok(write!(self.writer, "{v}")?),
-            Yaml::Value(Scalar::FloatingPoint(ref v)) => Ok(write!(self.writer, "{v}")?),
+            Yaml::Value(Scalar::FloatingPoint(ref v)) => Ok(write!(
+                self.writer,
+                "{v}{}",
+                if v.fract() == 0.0 { ".0" } else { "" }
+            )?),
             Yaml::Value(Scalar::Null) | Yaml::BadValue => Ok(write!(self.writer, "~")?),
             Yaml::Representation(ref v, style, ref tag) => {
                 if let Some(tag) = tag {
