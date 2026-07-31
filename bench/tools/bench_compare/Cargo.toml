@@ -1,17 +1,17 @@
 [package]
 name = "bench_compare"
-version = "0.6.0"
-authors = [
-  "Ethiraric <ethiraric@gmail.com>"
-]
-license = "MIT OR Apache-2.0"
-description = "Run multiple YAML parsers and compare their times"
-repository = "https://github.com/Ethiraric/yaml-rust2"
+publish = false
+version = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
 readme = "README.md"
-edition = "2018"
+description = "Run multiple YAML parsers and compare their times"
+repository = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
 
 [dependencies]
 anyhow = { version = "1.0.81", features = ["backtrace"] }
 serde = { version = "1.0.197", features = ["derive"] }
 serde_yaml = "0.9.32"
-toml = "0.9.0"
+toml = "1.0"
