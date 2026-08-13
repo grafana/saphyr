@@ -199,6 +199,99 @@ value: 100.0"#;
 }
 
 #[test]
+fn test_sort_keys() {
+    let input = r"---
+z: last
+a: first
+item10: ten
+item2: two
+nested:
+  z: 1
+  a: 2
+sequence:
+  - z: 1
+    a: 2";
+    let expected = r"---
+a: first
+item2: two
+item10: ten
+nested:
+  a: 2
+  z: 1
+sequence:
+  - a: 2
+    z: 1
+z: last";
+    let docs = Yaml::load_from_str(input).unwrap();
+    let mut writer = String::new();
+    let mut emitter = YamlEmitter::new(&mut writer);
+
+    assert!(!emitter.is_sorting_keys());
+    emitter.sort_keys(true);
+    assert!(emitter.is_sorting_keys());
+    emitter.dump(&docs[0]).unwrap();
+
+    assert_eq!(expected, writer);
+    let original_keys: Vec<_> = docs[0]
+        .as_mapping()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        original_keys,
+        ["z", "a", "item10", "item2", "nested", "sequence"]
+    );
+}
+
+#[test]
+fn test_sort_keys_orders_scalars_before_yaml_only_keys() {
+    let input = r"---
+~: null
+string: string
+? [z, a]
+: sequence
+true: boolean true
+1: integer one
+1.0: float one
+0.5: half
+false: boolean false
+-1: negative
+? { z: 1, a: 2 }
+: mapping";
+    let docs = Yaml::load_from_str(input).unwrap();
+    let mut writer = String::new();
+    let mut emitter = YamlEmitter::new(&mut writer);
+    emitter.sort_keys(true);
+    emitter.dump(&docs[0]).unwrap();
+
+    let ordered_fragments = [
+        "-1: negative",
+        "false: boolean false",
+        "0.5: half",
+        "true: boolean true",
+        "1: integer one",
+        "1.0: float one",
+        "string: string",
+        "~: ~",
+        "? - z",
+        "? a: 2",
+    ];
+    let positions: Vec<_> = ordered_fragments
+        .iter()
+        .map(|fragment| {
+            writer
+                .find(fragment)
+                .unwrap_or_else(|| panic!("missing {fragment:?} in:\n{writer}"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{writer}"
+    );
+}
+
+#[test]
 fn test_empty_and_nested() {
     test_empty_and_nested_flag(false);
 }

@@ -2,6 +2,11 @@
 
 ## v0.0.12
 
+**Features**:
+
+- `YamlEmitter::sort_keys` can now order mapping keys using go-yaml-compatible numeric and natural
+string ordering. The option is disabled by default so mappings otherwise retain insertion order.
+
 **Fixes**:
 
 - Whole floats such as `100.0` were being emitted as integers by `YamlEmitter`.

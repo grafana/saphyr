@@ -1,6 +1,7 @@
 //! YAML serialization helpers.
 
-use core::fmt;
+use alloc::{borrow::Cow, vec::Vec};
+use core::{cmp::Ordering, fmt};
 
 use ordered_float::FloatCore;
 use thiserror::Error;
@@ -39,6 +40,7 @@ pub struct YamlEmitter<'a> {
     compact: bool,
     level: isize,
     multiline_strings: bool,
+    sort_keys: bool,
 }
 
 /// A convenience alias for emitter functions that may fail without returning a value.
@@ -122,6 +124,7 @@ impl<'a> YamlEmitter<'a> {
             compact: true,
             level: -1,
             multiline_strings: false,
+            sort_keys: false,
         }
     }
 
@@ -177,6 +180,25 @@ impl<'a> YamlEmitter<'a> {
     #[must_use]
     pub fn is_multiline_strings(&self) -> bool {
         self.multiline_strings
+    }
+
+    /// Sort mapping keys using go-yaml's ordering when serializing.
+    ///
+    /// Boolean, integer and floating-point keys are ordered by numeric value. String keys use a
+    /// natural ordering, so numeric portions are compared numerically (for example, `item2` sorts
+    /// before `item10`). YAML-only keys that go-yaml cannot represent as map keys are emitted after
+    /// supported keys in their original relative order.
+    ///
+    /// Ordering applies recursively to every emitted mapping without modifying the underlying YAML
+    /// document. This option is disabled by default, preserving each mapping's insertion order.
+    pub fn sort_keys(&mut self, sort_keys: bool) {
+        self.sort_keys = sort_keys;
+    }
+
+    /// Determine whether this emitter sorts mapping keys.
+    #[must_use]
+    pub fn is_sorting_keys(&self) -> bool {
+        self.sort_keys
     }
 
     /// Dump Yaml to an output stream.
@@ -321,26 +343,40 @@ impl<'a> YamlEmitter<'a> {
             self.writer.write_str("{}")?;
         } else {
             self.level += 1;
-            for (cnt, (k, v)) in h.iter().enumerate() {
-                let complex_key = matches!(k, Yaml::Mapping(_) | Yaml::Sequence(_));
-                if cnt > 0 {
-                    writeln!(self.writer)?;
-                    self.write_indent()?;
-                }
-                if complex_key {
-                    write!(self.writer, "?")?;
-                    self.emit_val(true, k)?;
-                    writeln!(self.writer)?;
-                    self.write_indent()?;
-                    write!(self.writer, ":")?;
-                    self.emit_val(true, v)?;
-                } else {
-                    self.emit_node(k)?;
-                    write!(self.writer, ":")?;
-                    self.emit_val(false, v)?;
-                }
+            if self.sort_keys {
+                let mut entries: Vec<_> = h.iter().collect();
+                entries.sort_by(|(a, _), (b, _)| compare_yaml_keys(a, b));
+                self.emit_mapping_entries(entries.into_iter())?;
+            } else {
+                self.emit_mapping_entries(h.iter())?;
             }
             self.level -= 1;
+        }
+        Ok(())
+    }
+
+    fn emit_mapping_entries<'b>(
+        &mut self,
+        entries: impl Iterator<Item = (&'b Yaml<'b>, &'b Yaml<'b>)>,
+    ) -> EmitResult {
+        for (cnt, (k, v)) in entries.enumerate() {
+            let complex_key = matches!(k, Yaml::Mapping(_) | Yaml::Sequence(_));
+            if cnt > 0 {
+                writeln!(self.writer)?;
+                self.write_indent()?;
+            }
+            if complex_key {
+                write!(self.writer, "?")?;
+                self.emit_val(true, k)?;
+                writeln!(self.writer)?;
+                self.write_indent()?;
+                write!(self.writer, ":")?;
+                self.emit_val(true, v)?;
+            } else {
+                self.emit_node(k)?;
+                write!(self.writer, ":")?;
+                self.emit_val(false, v)?;
+            }
         }
         Ok(())
     }
@@ -390,6 +426,182 @@ impl<'a> YamlEmitter<'a> {
     fn should_emit_string_as_block(&self, s: &str) -> bool {
         self.multiline_strings && s.contains('\n') && char_traits::is_valid_literal_block_scalar(s)
     }
+}
+
+#[derive(Copy, Clone)]
+enum SortableKey<'a> {
+    Number(NumberKey),
+    String(&'a str),
+    Unsupported,
+}
+
+#[derive(Copy, Clone)]
+enum NumberKey {
+    Boolean(bool),
+    Integer(i64),
+    FloatingPoint(f64),
+}
+
+impl NumberKey {
+    #[allow(clippy::cast_precision_loss)] // go-yaml compares all numeric key kinds as float64.
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Boolean(value) => u8::from(value).into(),
+            Self::Integer(value) => value as f64,
+            Self::FloatingPoint(value) => value,
+        }
+    }
+
+    fn kind(self) -> u8 {
+        match self {
+            Self::Boolean(_) => 0,
+            Self::Integer(_) => 1,
+            Self::FloatingPoint(_) => 2,
+        }
+    }
+}
+
+fn compare_yaml_keys(a: &Yaml, b: &Yaml) -> Ordering {
+    match (sortable_key(a), sortable_key(b)) {
+        (SortableKey::Number(a), SortableKey::Number(b)) => compare_number_keys(a, b),
+        (SortableKey::Number(_), _) | (SortableKey::String(_), SortableKey::Unsupported) => {
+            Ordering::Less
+        }
+        (SortableKey::String(a), SortableKey::String(b)) => compare_string_keys(a, b),
+        (SortableKey::String(_), SortableKey::Number(_))
+        | (SortableKey::Unsupported, SortableKey::Number(_) | SortableKey::String(_)) => {
+            Ordering::Greater
+        }
+        (SortableKey::Unsupported, SortableKey::Unsupported) => Ordering::Equal,
+    }
+}
+
+fn sortable_key<'a>(yaml: &'a Yaml<'_>) -> SortableKey<'a> {
+    match yaml {
+        Yaml::Value(scalar) => sortable_scalar(scalar),
+        Yaml::Representation(value, style, tag) => {
+            let parsed = Scalar::parse_from_cow_and_metadata(
+                Cow::Borrowed(value.as_ref()),
+                *style,
+                tag.as_ref(),
+            );
+            match parsed.as_ref() {
+                Some(Scalar::Boolean(value)) => SortableKey::Number(NumberKey::Boolean(*value)),
+                Some(Scalar::Integer(value)) => SortableKey::Number(NumberKey::Integer(*value)),
+                Some(Scalar::FloatingPoint(value)) => {
+                    SortableKey::Number(NumberKey::FloatingPoint(value.into_inner()))
+                }
+                Some(Scalar::String(_)) => SortableKey::String(value),
+                Some(Scalar::Null) | None => SortableKey::Unsupported,
+            }
+        }
+        Yaml::Tagged(_, node) => sortable_key(node),
+        Yaml::Sequence(_) | Yaml::Mapping(_) | Yaml::Alias(_) | Yaml::BadValue => {
+            SortableKey::Unsupported
+        }
+    }
+}
+
+fn sortable_scalar<'a>(scalar: &'a Scalar<'_>) -> SortableKey<'a> {
+    match scalar {
+        Scalar::Boolean(value) => SortableKey::Number(NumberKey::Boolean(*value)),
+        Scalar::Integer(value) => SortableKey::Number(NumberKey::Integer(*value)),
+        Scalar::FloatingPoint(value) => {
+            SortableKey::Number(NumberKey::FloatingPoint(value.into_inner()))
+        }
+        Scalar::String(value) => SortableKey::String(value),
+        Scalar::Null => SortableKey::Unsupported,
+    }
+}
+
+#[allow(clippy::float_cmp)] // Exact equality selects go-yaml's key-kind tie-breaker.
+fn compare_number_keys(a: NumberKey, b: NumberKey) -> Ordering {
+    let af = a.as_f64();
+    let bf = b.as_f64();
+    let value_order = if af == bf {
+        Ordering::Equal
+    } else if af.is_nan() || bf.is_nan() {
+        af.is_nan().cmp(&bf.is_nan())
+    } else {
+        af.partial_cmp(&bf).unwrap_or(Ordering::Equal)
+    };
+    if value_order != Ordering::Equal {
+        return value_order;
+    }
+
+    let kind_order = a.kind().cmp(&b.kind());
+    if kind_order != Ordering::Equal {
+        return kind_order;
+    }
+
+    match (a, b) {
+        (NumberKey::Boolean(a), NumberKey::Boolean(b)) => a.cmp(&b),
+        (NumberKey::Integer(a), NumberKey::Integer(b)) => a.cmp(&b),
+        (NumberKey::FloatingPoint(a), NumberKey::FloatingPoint(b)) => a.total_cmp(&b),
+        _ => Ordering::Equal,
+    }
+}
+
+fn compare_string_keys(a: &str, b: &str) -> Ordering {
+    let mut ar = a.chars();
+    let mut br = b.chars();
+    let mut digits = false;
+    let mut digit_run_has_nonzero = false;
+
+    loop {
+        let (ac, bc) = match (ar.next(), br.next()) {
+            (Some(ac), Some(bc)) => (ac, bc),
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+        };
+
+        if ac == bc {
+            digits = ac.is_ascii_digit();
+            digit_run_has_nonzero = digits && (digit_run_has_nonzero || ac != '0');
+            continue;
+        }
+
+        let al = ac.is_alphabetic();
+        let bl = bc.is_alphabetic();
+        if al && bl {
+            return ac.cmp(&bc);
+        }
+        if al || bl {
+            return if digits { bl.cmp(&al) } else { al.cmp(&bl) };
+        }
+
+        let initial = i64::from((ac == '0' || bc == '0') && digit_run_has_nonzero);
+        let (an, ai) = consume_number(ac, &mut ar, initial);
+        let (bn, bi) = consume_number(bc, &mut br, initial);
+
+        return an
+            .cmp(&bn)
+            .then_with(|| ai.cmp(&bi))
+            .then_with(|| ac.cmp(&bc));
+    }
+}
+
+fn consume_number(
+    first: char,
+    chars: &mut impl Iterator<Item = char>,
+    initial: i64,
+) -> (i64, usize) {
+    if !first.is_ascii_digit() {
+        return (initial, 0);
+    }
+
+    let mut number = initial
+        .wrapping_mul(10)
+        .wrapping_add(i64::from(first as u8 - b'0'));
+    let mut len = 1;
+    for ch in chars.take_while(char::is_ascii_digit) {
+        number = number
+            .wrapping_mul(10)
+            .wrapping_add(i64::from(ch as u8 - b'0'));
+        len += 1;
+    }
+    (number, len)
 }
 
 /// Check if the string requires quoting.
@@ -458,9 +670,12 @@ fn need_quotes(string: &str) -> bool {
 
 #[cfg(test)]
 mod test {
-    use alloc::string::String;
+    use alloc::{borrow::Cow, string::String};
+    use core::cmp::Ordering;
 
-    use crate::{LoadableYamlNode, Yaml, YamlEmitter};
+    use crate::{LoadableYamlNode, Scalar, ScalarStyle, Yaml, YamlEmitter};
+
+    use super::{compare_string_keys, compare_yaml_keys};
 
     #[test]
     fn test_multiline_string() {
@@ -470,5 +685,60 @@ mod test {
         let mut emitter = YamlEmitter::new(&mut output);
         emitter.multiline_strings(true);
         emitter.dump(&parsed[0]).unwrap();
+    }
+
+    #[test]
+    fn test_go_yaml_string_key_comparison() {
+        let less_than_pairs = [
+            ("item2", "item10"),
+            ("a_", "aa"),
+            ("a1a", "a1_"),
+            ("a", "aa"),
+            ("1", "01"),
+        ];
+        for (a, b) in less_than_pairs {
+            assert_eq!(compare_string_keys(a, b), Ordering::Less, "{a:?} < {b:?}");
+            assert_eq!(
+                compare_string_keys(b, a),
+                Ordering::Greater,
+                "{b:?} > {a:?}"
+            );
+        }
+
+        // Numeric accumulation follows go-yaml's wrapping behavior rather than panicking.
+        compare_string_keys("item99999999999999999999", "item100000000000000000000");
+    }
+
+    #[test]
+    fn test_go_yaml_scalar_key_comparison() {
+        let boolean_false = Yaml::Value(Scalar::Boolean(false));
+        let boolean_true = Yaml::Value(Scalar::Boolean(true));
+        let integer_zero = Yaml::Value(Scalar::Integer(0));
+        let integer_one = Yaml::Value(Scalar::Integer(1));
+        let string = Yaml::Value(Scalar::String("0".into()));
+        let unsupported = Yaml::Value(Scalar::Null);
+
+        assert_eq!(
+            compare_yaml_keys(&boolean_false, &integer_zero),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_yaml_keys(&boolean_true, &integer_one),
+            Ordering::Less
+        );
+        assert_eq!(compare_yaml_keys(&integer_one, &string), Ordering::Less);
+        assert_eq!(compare_yaml_keys(&string, &unsupported), Ordering::Less);
+        assert_eq!(
+            compare_yaml_keys(&unsupported, &unsupported),
+            Ordering::Equal
+        );
+
+        let plain_integer = Yaml::Representation(Cow::Borrowed("10"), ScalarStyle::Plain, None);
+        let quoted_string =
+            Yaml::Representation(Cow::Borrowed("2"), ScalarStyle::SingleQuoted, None);
+        assert_eq!(
+            compare_yaml_keys(&plain_integer, &quoted_string),
+            Ordering::Less
+        );
     }
 }
