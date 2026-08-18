@@ -542,7 +542,13 @@ fn compare_number_keys(a: NumberKey, b: NumberKey) -> Ordering {
     }
 }
 
-fn compare_string_keys(a: &str, b: &str) -> Ordering {
+/// Compare string mapping keys using go-yaml's natural ordering.
+///
+/// Numeric portions are compared numerically, so `item2` sorts before
+/// `item10`. This is the ordering used when [`YamlEmitter::sort_keys`] is
+/// enabled.
+#[must_use]
+pub fn compare_string_keys(a: &str, b: &str) -> Ordering {
     let mut ar = a.chars();
     let mut br = b.chars();
     let mut digits = false;
@@ -706,7 +712,7 @@ mod test {
         }
 
         // Numeric accumulation follows go-yaml's wrapping behavior rather than panicking.
-        compare_string_keys("item99999999999999999999", "item100000000000000000000");
+        let _ = compare_string_keys("item99999999999999999999", "item100000000000000000000");
     }
 
     #[test]

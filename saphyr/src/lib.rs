@@ -152,7 +152,7 @@ pub use crate::annotated::{
     AnnotatedSequenceOwned, AnnotatedYamlIter, YamlData, YamlDataOwned, marked_yaml::MarkedYaml,
     marked_yaml_owned::MarkedYamlOwned,
 };
-pub use crate::emitter::{EmitError, YamlEmitter};
+pub use crate::emitter::{EmitError, YamlEmitter, compare_string_keys};
 pub use crate::index::{Accessor, SafelyIndex, SafelyIndexMut};
 pub use crate::loader::{LoadError, LoadableYamlNode, YamlLoader};
 pub use crate::scalar::{Scalar, ScalarOwned, parse_core_schema_fp};
